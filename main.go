@@ -16,38 +16,42 @@ import (
 type VideoOccurence struct {
 	Timestamp time.Time
 	YTID      string
+	Language  string
 }
 
 type topVideoResult struct {
-	Id    string `bson:"_id"`
-	Count int    `bson:"count"`
+	Id    string   `bson:"_id"`
+	Count int      `bson:"count"`
+	Lang  []string `bson:"langs"`
 }
 
 func main() {
 
-	http.HandleFunc("/toptweets", TopVideos)
+	voChan := findVideos()
+	go func() {
+		session, err := mgo.Dial("localhost:27017")
+		defer session.Close()
 
+		c := session.DB("twitwyrm").C("VideoOccurences")
+		session.SetMode(mgo.Monotonic, true)
+
+		if err != nil {
+			panic(err)
+		}
+
+		for vo := range voChan {
+			err = c.Insert(vo)
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}()
+
+	http.HandleFunc("/toptweets", TopVideos)
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		panic(err)
 	}
-	voChan := findVideos()
-	session, err := mgo.Dial("localhost:27017")
-	if err != nil {
-		panic(err)
-	}
-	// defer session.Close()
-
-	c := session.DB("twitwyrm").C("VideoOccurences")
-	session.SetMode(mgo.Monotonic, true)
-
-	for vo := range voChan {
-		err = c.Insert(vo)
-		if err != nil {
-			log.Println(err)
-		}
-	}
-
 }
 
 func findVideos() chan VideoOccurence {
@@ -73,16 +77,15 @@ func findVideos() chan VideoOccurence {
 						fmt.Println(err)
 						continue
 					}
-					vo := VideoOccurence{}
+					vo := VideoOccurence{
+						Timestamp: time.Now(),
+						Language:  tweet.Lang,
+					}
 					switch parsed.Host {
 					case "youtu.be":
 						videoId := parsed.Path
 						if len(videoId) == 12 {
-							videoId = videoId[1:]
-							// log.Println(videoId)
-							vo.YTID = videoId
-							vo.Timestamp = time.Now()
-							voChan <- vo
+							vo.YTID = videoId[1:]
 						}
 					case "youtube.com":
 						// log.Println(parsed)
@@ -90,11 +93,12 @@ func findVideos() chan VideoOccurence {
 							videoId := videoIdSlice[0]
 							if len(videoId) == 11 { // All youtube IDs are length 11
 								vo.YTID = videoId
-								vo.Timestamp = time.Now()
-								voChan <- vo
 							}
 						}
 
+					}
+					if vo.YTID != "" {
+						voChan <- vo
 					}
 				}
 			}
@@ -103,11 +107,16 @@ func findVideos() chan VideoOccurence {
 	return voChan
 }
 
-func getTopVideos(c *mgo.Collection) ([]topVideoResult, error) {
+func getTopVideos(c *mgo.Collection, lang string) ([]topVideoResult, error) {
 
-	q := []bson.M{bson.M{"$group": bson.M{"_id": "$ytid", "count": bson.M{"$sum": 1}}},
-		bson.M{"$sort": bson.M{"count": -1}},
-		bson.M{"$limit": 10}}
+	q := []bson.M{bson.M{"$group": bson.M{"_id": "$ytid", "count": bson.M{"$sum": 1}, "langs": bson.M{"$addToSet": "$language"}}},
+		bson.M{"$sort": bson.M{"count": -1}}}
+
+	if lang != "" {
+		q = append(q, bson.M{"$match": bson.M{"langs": lang}})
+	}
+
+	q = append(q, bson.M{"$limit": 10})
 	pipe := c.Pipe(q)
 
 	r := topVideoResult{}
@@ -128,18 +137,24 @@ func getTopVideos(c *mgo.Collection) ([]topVideoResult, error) {
 }
 
 func TopVideos(w http.ResponseWriter, r *http.Request) {
+	var results []topVideoResult
 	session, err := mgo.Dial("localhost:27017")
+	defer session.Close()
 	if err != nil {
 		panic(err)
 	}
 	c := session.DB("twitwyrm").C("VideoOccurences")
-	results, err := getTopVideos(c)
+	lang, ok := r.URL.Query()["lang"]
+	if ok {
+		results, err = getTopVideos(c, lang[0])
+	} else {
+		results, err = getTopVideos(c, "")
+	}
 	if err != nil {
 		fmt.Fprintln(w, err.Error())
 	}
 
 	encoder := json.NewEncoder(w)
-
 	encoder.Encode(results)
 
 }

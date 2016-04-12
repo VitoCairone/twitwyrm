@@ -1,2 +1,2 @@
 # twitwyrm
-MongoDB/Go/Angular/TwitterFirehouse App For Doing Amazing Awesome Shit
+MongoDB/Go/Angular/TwitterFirehouse App for extracting particular formatted strings from TwitterFirehouse
